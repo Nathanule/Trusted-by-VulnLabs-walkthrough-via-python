@@ -1,0 +1,7 @@
+## Python requirements for scanner and web fuzzing
+nmap3
+pandas
+beautifulsoup4
+requests
+urllib3
+httpx
