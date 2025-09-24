@@ -13,6 +13,7 @@ ip_2 = "10.10.207.54"
 credentials = []
 services = []
 run_in_background = []
+found_web_directories = []
 
 class Scanner:
     def __init__(self, ip):
@@ -34,6 +35,17 @@ class Scanner:
         print(services)
 
 class WebFuzzing:
+    """
+    A class for performing web fuzzing to discover accessible directories on a target web server.
+    Attributes:
+        ip (str): The IP address of the target server.
+        thread_count (int): The number of threads to use for concurrent requests.
+    Methods:
+        check_directory(url):
+            Sends a HEAD request to the specified URL and prints it if the response status code indicates the directory exists or is accessible (200, 301, 403).
+        httpx_fuzzing():
+            Determines the base URL based on detected HTTP/HTTPS services, reads a wordlist of directory names, and concurrently checks each directory using threads.
+    """
     def __init__(self, ip, thread_count):
         self.ip = ip
         self.thread_count = thread_count
@@ -42,7 +54,7 @@ class WebFuzzing:
         try:
             response = httpx.head(url, verify=False, timeout=3)
             if response.status_code in [200, 301, 403]:
-                print(f"Found URL: {url}")
+                print(f"Found URL ({response.status_code}): {url}")
         except Exception:
             pass
 
@@ -65,56 +77,7 @@ class WebFuzzing:
         except FileNotFoundError:
             print(f"wordlist '{wordlist}' not found")
 
-    def directory_fuzzing(self):
-        if any(entry['port'] == '80' and entry['service'] == 'http' for entry in services):
-            # running the following if port 80 and http is spresnt in the global service array
-            base_url = f"http://{self.ip}/"
-            wordlist = input('Specify the worklist to use for directory busting: ')# asking user to specify the wordlist to use
-            global web_directories
-            # Open and read wordlist specified user
-            try:
-                with open(wordlist, 'r') as f:
-                    for line in f:
-                        dir_name = line.strip()
-                        url = base_url + dir_name
-                        response = requests.get(url, timeout=3)
-                        if response.status_code == "200" or response.status_code == 301:
-                            web_directories.append(dir_name)
-                            print(url)
-                        else:
-                            pass
-            except FileNotFoundError:
-                print(f'Wordlist file "{wordlist}" not found.')
-        elif any(entry['port'] == '443' and entry['service'] == 'https' for entry in services):
-            # Ignore InsecureRequestWarning's
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-            #run the following if https is present
-            base_url = f"https://{self.ip}/"
-            wordlist = input('Specify the worklist to use for directory busting: ')# asking user to specify the wordlist to use
-            # Open and read wordlist specified user
-            try:
-                with open(wordlist, 'r') as f:
-                    for line in f:
-                        dir_name = line.strip()
-                        url = base_url + dir_name
-                        response = requests.get(url, verify=False, timeout=3)
-                        if response.status_code == "200" or response.status_code == 301:
-                            web_directories.append(dir_name)
-                            print(url)
-                        else:
-                            pass
-            except FileNotFoundError:
-                print(f'Wordlist file "{wordlist}" not found.')
-        else:
-            pass
-
-
-
-
-
-
-
-        
+    
 
 if __name__ == "__main__":
     scanner = Scanner(ip=ip_2)
