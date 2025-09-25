@@ -9,6 +9,7 @@ import httpx
 from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from colorama import Fore, Style, init
+import time
 
 ip_1 = "10.10.207.69"
 ip_2 = "10.10.207.70"
@@ -17,6 +18,7 @@ services = []
 run_in_background = []
 found_web_directories = []
 links = []
+lfi_results = []
 
 class Scanner:
     def __init__(self, ip):
@@ -52,6 +54,7 @@ class WebFuzzing:
     def __init__(self, ip, thread_count):
         self.ip = ip
         self.thread_count = thread_count
+        self.stop_fuzzing = False
 
     def check_directory(self, url):
         try:
@@ -68,15 +71,29 @@ class WebFuzzing:
             base_url = f"https://{self.ip}/"
         else:
             print("No HTTP/S detected")
-        
+            return
+
         wordlist = "/usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt"
+
+        def wait_for_user():
+            input("Press Enter at any time to proceed to the next phase...\n")
+            self.stop_fuzzing = True
+
+        threading.Thread(target=wait_for_user, daemon=True).start()
         try:
             with open(wordlist, 'r') as f:
                 dirs = [line.strip() for line in f]
-            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor: # due to ThreadPoolExecutor behviour some tasks (dir busting) will continue after breaking to the next phase
                 for dirs_name in dirs:
+                    if self.stop_fuzzing:
+                        print("Proceeding to locating possible LFI's in found web pages")
+                        break
                     url = base_url + dirs_name
                     executor.submit(self.check_directory, url)
+                    time.sleep(0.01)
+                if self.stop_fuzzing:
+                    executor.shutdown(wait=True)
+                    self.locate_lfi('/dev') # testing, need to add ability to iterate through found webpages
         except FileNotFoundError:
             print(f"wordlist '{wordlist}' not found")
 
@@ -88,9 +105,13 @@ class WebFuzzing:
         hrefs = []
         for link in links:
             href = link.get("href")
-            hrefs.append(str(href))
-            print(href)
+            if href not in hrefs:
+                hrefs.append(str(href))
+        hrefs_df = pd.DataFrame({'Links': hrefs})
+        print(Fore.GREEN + f"Links scraped of web page: {web_page}" + Style.RESET_ALL)
+        print(hrefs_df)
         
+        print(Fore.YELLOW + "Possible LFI Vulnerbility" + Style.RESET_ALL)
         possible_lfi = set()
         for href in hrefs:
             if href and "?" in href:
@@ -99,18 +120,26 @@ class WebFuzzing:
                 result = f"?{param}="
                 if result not in possible_lfi:
                     possible_lfi.add(result)
-                    print((Fore.RED + f"http://{self.ip}{web_page}{result}" + Style.RESET_ALL))
+                    lfi_results.append({"Href": href, "Parameter": result})
+        lfi_df = pd.DataFrame(lfi_results)
+        print(lfi_df)
+
+
+        
+                    
 
         
 
     
 
 if __name__ == "__main__":
-    scanner = Scanner(ip=ip_2)
-    scanner.scan_all_ports()
-    dir_fuzzer = WebFuzzing(ip_2, 10)
-    dir_fuzzer.httpx_fuzzing()
-    test = WebFuzzing(ip_2, 5)
-    test.locate_lfi("/dev")
+    #scanner = Scanner(ip=ip_2)
+    #scanner.scan_all_ports()
+    #web_actions = WebFuzzing(ip_2, 10)
+    #web_actions.httpx_fuzzing()
+    test_lfi = WebFuzzing(ip_2, 1)
+    test_lfi.locate_lfi('/dev')
+
+    
 
 
