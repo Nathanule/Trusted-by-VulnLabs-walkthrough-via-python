@@ -7,13 +7,16 @@ import urllib3
 import threading
 import httpx
 from concurrent.futures import ThreadPoolExecutor
+from selenium import webdriver
+from colorama import Fore, Style, init
 
-ip_1 = "10.10.207.53"
-ip_2 = "10.10.207.54"
+ip_1 = "10.10.207.69"
+ip_2 = "10.10.207.70"
 credentials = []
 services = []
 run_in_background = []
 found_web_directories = []
+links = []
 
 class Scanner:
     def __init__(self, ip):
@@ -77,6 +80,29 @@ class WebFuzzing:
         except FileNotFoundError:
             print(f"wordlist '{wordlist}' not found")
 
+    def locate_lfi(self, web_page):
+        response = requests.get(f"http://{self.ip}/{web_page}")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        links = soup.find_all("a")
+
+        hrefs = []
+        for link in links:
+            href = link.get("href")
+            hrefs.append(str(href))
+            print(href)
+        
+        possible_lfi = set()
+        for href in hrefs:
+            if href and "?" in href:
+                query_part = href.split("?")[1]
+                param = query_part.split("=")[0]
+                result = f"?{param}="
+                if result not in possible_lfi:
+                    possible_lfi.add(result)
+                    print((Fore.RED + f"http://{self.ip}{web_page}{result}" + Style.RESET_ALL))
+
+        
+
     
 
 if __name__ == "__main__":
@@ -84,5 +110,7 @@ if __name__ == "__main__":
     scanner.scan_all_ports()
     dir_fuzzer = WebFuzzing(ip_2, 10)
     dir_fuzzer.httpx_fuzzing()
+    test = WebFuzzing(ip_2, 5)
+    test.locate_lfi("/dev")
 
 
