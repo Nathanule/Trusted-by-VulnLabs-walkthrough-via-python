@@ -13,6 +13,8 @@ import base64
 import re
 import mysql.connector
 import subprocess
+import asyncio
+import signal
 
 
 ip_1 = "10.10.147.69"
@@ -61,11 +63,25 @@ class WebFuzzing:
             Sends a HEAD request to the specified URL and prints it if the response status code indicates the directory exists or is accessible (200, 301, 403).
         httpx_fuzzing():
             Determines the base URL based on detected HTTP/HTTPS services, reads a wordlist of directory names, and concurrently checks each directory using threads.
+        check_directory_async(client, url):
+            Asynchronous version for checking directories.
+        start():
+            Asynchronous directory fuzzing using httpx.AsyncClient.
+        locate_lfi(web_page):
+            Scrapes links from the given web page and identifies possible LFI parameters.
+        test_lfi(payload_file):
+            Tests each LFI candidate with payloads from the file.
+        test_php_filter(payload):
+            Attempts to extract and decode base64 content from LFI responses using PHP filters.
+        extract_credentials_from_dict(data, keywords=None):
+            Extracts credentials from a dictionary using regex.
     """
     def __init__(self, ip, thread_count):
         self.ip = ip
         self.thread_count = thread_count
         self.stop_fuzzing = False
+        self.found_web_directories = []
+        self.cancelled = False
 
     def extract_credentials_from_dict(self, data: dict, keywords=None):
         if keywords is None:
@@ -78,19 +94,17 @@ class WebFuzzing:
                 if var.lower() in keywords:
                     credentials_found.append({var: val})
         return credentials_found
-
-
+    
     def check_directory(self, url):
-        # Sends a HEAD request to check if the directory exists or is accessible
         try:
             response = httpx.head(url, verify=False, timeout=3)
             if response.status_code in [200, 301, 403]:
                 print(f"Found URL ({response.status_code}): {url}")
         except Exception:
             pass
-
+    
     def httpx_fuzzing(self):
-        # Directory fuzzing using httpx and threads. User can interrupt to move to next phase.
+        # Synchronous directory fuzzing using threads
         if any(entry['port'] == '80' and entry['service'] == 'http' for entry in services):
             base_url = f"http://{self.ip}/"
         elif any(entry['port'] == '443' and entry['service'] == 'https' for entry in services):
@@ -100,31 +114,76 @@ class WebFuzzing:
             return
 
         wordlist = "/usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt"
-
-        # Start a background thread to listen for user input to break fuzzing
-        def wait_for_user():
-            input("Press Enter at any time to proceed to the next phase...\n")
-            self.stop_fuzzing = True
-
-        threading.Thread(target=wait_for_user, daemon=True).start()
         try:
             with open(wordlist, 'r') as f:
                 dirs = [line.strip() for line in f]
-            # ThreadPoolExecutor for concurrent directory checks
             with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
                 for dirs_name in dirs:
-                    if self.stop_fuzzing:
-                        print("Proceeding to locating possible LFI's in found web pages")
-                        break
                     url = base_url + dirs_name
                     executor.submit(self.check_directory, url)
-                    time.sleep(0.01)  # Small delay for responsiveness
-                # After user interrupts, shutdown threads and move to LFI phase
-                if self.stop_fuzzing:
-                    executor.shutdown(wait=True)
-                    self.locate_lfi('/dev') # testing, need to add ability to iterate through found webpages
+                    time.sleep(0.01)
         except FileNotFoundError:
             print(f"wordlist '{wordlist}' not found")
+
+    async def check_directory_async(self, client, url):
+        # Sends a HEAD request to check if the directory exists or is accessible
+        try:
+            response = await client.head(url, timeout=3)
+            if response.status_code in [200, 301, 403]:
+                print(f"Found URL ({response.status_code}): {url}")
+                self.found_web_directories.append(url)
+        except Exception:
+            pass
+
+    async def start(self):
+        # Define a signal handler for Ctrl+C to allow user to cancel fuzzing
+        def handler(signum, frame):
+            print("\nDirectory fuzzing canceled by user. Proceeding to locating LFI phase")
+            self.cancelled = True  # Set flag to stop fuzzing
+
+        signal.signal(signal.SIGINT, handler)  # Register the signal handler
+
+        # Determine the base URL based on detected HTTP/HTTPS services
+        if any(entry['port'] == '80' and entry['service'] == 'http' for entry in services):
+            base_url = f"http://{self.ip}/"
+        elif any(entry['port'] == '443' and entry['service'] == 'https' for entry in services):
+            base_url = f"https://{self.ip}/"
+        else:
+            print("No HTTP/S detected")
+            return  # Exit if no web service detected
+
+        # Specify the wordlist file for directory fuzzing
+        wordlist = "/usr/share/wordlists/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt"
+        try:
+            # Read all directory names from the wordlist file
+            with open(wordlist, 'r') as f:
+                dirs = [line.strip() for line in f]
+            # Create an asynchronous HTTP client
+            async with httpx.AsyncClient(verify=False) as client:
+                tasks = []  # List to hold async tasks
+                for dirs_name in dirs:
+                    url = base_url + dirs_name  # Build the full URL for each directory
+                    tasks.append(self.check_directory_async(client, url))  # Add async check task
+                    if len(tasks) >= self.thread_count:  # If enough tasks for one batch
+                        await asyncio.gather(*tasks)  # Run all tasks concurrently
+                        tasks = []  # Reset tasks list for next batch
+                    if self.cancelled:  # If user cancelled fuzzing
+                        break  # Exit the loop early
+                # Run any remaining tasks that didn't fill a batch
+                if tasks:
+                    await asyncio.gather(*tasks)
+        except FileNotFoundError:
+            print(f"wordlist '{wordlist}' not found")  # Handle missing wordlist file
+
+        # After fuzzing (or cancellation), run locate_lfi on all found directories
+        if self.found_web_directories:
+            print("\nRunning locate_lfi on found directories...")
+            for url in self.found_web_directories:
+                # Extract the path from the found URL for locate_lfi
+                path = url.split(self.ip)[-1]
+                self.locate_lfi(path)
+        else:
+            print("No directories found to test for LFI.")
 
     def locate_lfi(self, web_page):
         # Scrape links from the given web page and identify possible LFI parameters
@@ -406,9 +465,10 @@ class Hashes:
 
 
 if __name__ == "__main__":
-    #scanner = Scanner(ip=ip_2)
-    #scanner.scan_all_ports()
-    #web_actions = WebFuzzing(ip_2, 10)
+    scanner = Scanner(ip=ip_2)
+    scanner.scan_all_ports()
+    web_actions = WebFuzzing(ip_2, 1)
+    asyncio.run(web_actions.start())
     #web_actions.httpx_fuzzing()
     test_lfi = WebFuzzing(ip_2, 1)
     test_lfi.locate_lfi('/dev')
@@ -420,8 +480,8 @@ if __name__ == "__main__":
     hash_functions = Hashes(hashes)
     hash_functions.extract_hash_from_data()
     hash_functions.hashcat_md5(hashes)
-    
 
-    
+
+
 
 
